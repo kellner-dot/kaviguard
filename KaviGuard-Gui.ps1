@@ -23,7 +23,7 @@ function Get-KGData {
 
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "KaviGuard"
-$form.Size = New-Object System.Drawing.Size(460, 560)
+$form.Size = New-Object System.Drawing.Size(460, 610)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = $bg
 $form.ForeColor = $fg
@@ -154,9 +154,25 @@ Add-KGButton "Full Scan" 152 418 120 {
     $script:note.Text = "Full scan running in the background."
 }
 Add-KGButton "Refresh" 280 418 144 { Update-KGGui; $script:note.Text = "Refreshed." }
-Add-KGButton "Open Logs" 24 460 120 { Start-Process (Join-Path $script:dir "logs") }
-Add-KGButton "Quarantine" 152 460 120 { Start-Process (Join-Path $script:dir "quarantine") }
-Add-KGButton "Close" 280 460 144 { $form.Close() }
+Add-KGButton "Open Logs" 280 460 144 { Start-Process (Join-Path $script:dir "logs") }
+Add-KGButton "Tune-Up" 24 502 120 {
+    $script:note.Text = "Tune-up running - approve the admin prompt..."
+    Start-Process -FilePath "powershell.exe" -Verb RunAs -ArgumentList "$scanBase -TuneUp"
+    $script:note.Text = "Tune-up finished - see the toast and logs."
+}
+Add-KGButton "Scan File..." 152 502 120 {
+    $dlg = New-Object System.Windows.Forms.OpenFileDialog
+    $dlg.Title = "Pick a file to scan with Defender"
+    $dlg.Filter = "All files (*.*)|*.*"
+    if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        $p = $dlg.FileName
+        $script:note.Text = "Scanning $p - approve the admin prompt..."
+        Start-Process -FilePath "powershell.exe" -Verb RunAs -ArgumentList "$scanBase -ScanPath `"$p`""
+        $script:note.Text = "Scan running in the background."
+    }
+}
+Add-KGButton "Quarantine" 24 502 190 { Start-Process (Join-Path $script:dir "quarantine") }
+Add-KGButton "Close" 220 502 204 { $form.Close() }
 
 Update-KGGui
 [void]$form.ShowDialog()

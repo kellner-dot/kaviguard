@@ -2,7 +2,9 @@ param(
     [switch]$Status,
     [ValidateSet("Quick", "Full")][string]$ScanNow,
     [string]$AddExclusion,
-    [string]$RemoveExclusion
+    [string]$RemoveExclusion,
+    [switch]$TuneUp,
+    [string]$ScanPath
 )
 
 # KaviGuard v1 - lightweight malware watcher for Windows.
@@ -11,7 +13,7 @@ param(
 # scheduled Defender scans, and updates itself. No kernel driver, no AV engine.
 
 # ------------------------------ config ------------------------------
-$Version       = "1.1.0"
+$Version       = "1.4.0"
 $InstallDir    = "C:\Tools\KaviGuard"
 $QuarantineDir = Join-Path $InstallDir "quarantine"
 $LogDir        = Join-Path $InstallDir "logs"
@@ -49,7 +51,7 @@ $KnownGoodTasks = @(
     "RVG update check"
 )
 
-$UpdateBaseUrl = "https://raw.githubusercontent.com/YOURUSER/kaviguard/main"  # point at your repo
+$UpdateBaseUrl = "https://raw.githubusercontent.com/kellner-dot/kaviguard/main"
 
 $QuickScanTime = "03:00"   # daily Defender QuickScan at/after HH:mm
 $FullScanDay   = "Sunday"  # weekly Defender FullScan weekday
@@ -306,29 +308,38 @@ function Invoke-KGUpdate {
         $remote = (Invoke-WebRequest -Uri "$UpdateBaseUrl/version.txt" -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop).Content.Trim()
         if ([version]$remote -le [version]$Version) { return }
         Write-KGLog "update available: $Version -> $remote"
-        $tmpNew = Join-Path $InstallDir "KaviGuard.new.ps1"
-        Invoke-WebRequest -Uri "$UpdateBaseUrl/KaviGuard.ps1" -UseBasicParsing -TimeoutSec 120 -OutFile $tmpNew -ErrorAction Stop
-        $want = (Invoke-WebRequest -Uri "$UpdateBaseUrl/KaviGuard.ps1.sha256" -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop).Content.Trim().Split()[0].ToUpper()
-        $got = (Get-FileHash -Path $tmpNew -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpper()
-        if ($want -ne $got) {
-            Write-KGLog "update aborted: hash mismatch"
-            Remove-Item $tmpNew -Force -ErrorAction SilentlyContinue
-            return
+        # Full update: core engine + dashboard design + mailbox poller.
+        # Every file is hash-verified and syntax-checked BEFORE anything is replaced.
+        $targets = @(
+            @{ Url = "KaviGuard.ps1";     Dest = $PSCommandPath },
+            @{ Url = "KaviGuard-Gui.ps1";  Dest = (Join-Path $InstallDir "KaviGuard-Gui.ps1") }
+        )
+        $mbDest = Join-Path $InstallDir "mailbox\KaviGuard-Mailbox.ps1"
+        if (Test-Path $mbDest) { $targets += @{ Url = "KaviGuard-Mailbox.ps1"; Dest = $mbDest } }
+        $staged = @()
+        foreach ($t in $targets) {
+            $tmpNew = Join-Path $InstallDir ("upd_" + ([IO.Path]::GetFileNameWithoutExtension($t.Url)) + ".new.ps1")
+            Invoke-WebRequest -Uri "$UpdateBaseUrl/$($t.Url)" -UseBasicParsing -TimeoutSec 120 -OutFile $tmpNew -ErrorAction Stop
+            $want = (Invoke-WebRequest -Uri "$UpdateBaseUrl/$($t.Url).sha256" -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop).Content.Trim().Split()[0].ToUpper()
+            $got = (Get-FileHash -Path $tmpNew -Algorithm SHA256 -ErrorAction Stop).Hash.ToUpper()
+            if ($want -ne $got) { throw "update aborted: hash mismatch on $($t.Url)" }
+            $errs = $null
+            [void][System.Management.Automation.PSParser]::Tokenize((Get-Content $tmpNew -Raw), [ref]$errs)
+            if ($errs.Count -gt 0) { throw "update aborted: syntax errors in $($t.Url)" }
+            $staged += @{ Tmp = $tmpNew; Dest = $t.Dest; Url = $t.Url }
         }
-        $errs = $null
-        [void][System.Management.Automation.PSParser]::Tokenize((Get-Content $tmpNew -Raw), [ref]$errs)
-        if ($errs.Count -gt 0) {
-            Write-KGLog "update aborted: downloaded script has syntax errors"
-            Remove-Item $tmpNew -Force -ErrorAction SilentlyContinue
-            return
+        foreach ($s in $staged) {
+            Move-Item -Path $s.Tmp -Destination $s.Dest -Force -ErrorAction Stop
+            Write-KGLog "updated $($s.Url)"
         }
-        Move-Item -Path $tmpNew -Destination $PSCommandPath -Force -ErrorAction Stop
         try {
             Invoke-WebRequest -Uri "$UpdateBaseUrl/version.txt" -UseBasicParsing -TimeoutSec 20 `
                 -OutFile (Join-Path $InstallDir "version.txt") -ErrorAction Stop
         } catch {}
-        Write-KGLog "updated to $remote, restarting via scheduled task"
-        schtasks /run /tn "KaviGuard" | Out-Null
+        Write-KGLog "updated to $remote, restarting watcher with new code"
+        Show-KGToast "KaviGuard updated" "v$remote installed - restarting."
+        $helper = "Start-Sleep -Seconds 10; schtasks /end /tn 'KaviGuard' 2>`$null | Out-Null; Start-Sleep -Seconds 3; schtasks /run /tn 'KaviGuard' | Out-Null"
+        Start-Process "powershell.exe" -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass","-WindowStyle","Hidden","-Command",$helper | Out-Null
         exit
     } catch { Write-KGLog "update check failed: $($_.Exception.Message)" }
 }
@@ -453,6 +464,58 @@ function Invoke-KGScheduledScans {
     } catch { Write-KGLog "scheduled scan check failed: $($_.Exception.Message)" }
 }
 
+# ------------------------------ tune-up + on-demand scan ------------------------------
+function Get-KGFolderSize($Path) {
+    $s = [long]0
+    try { $s = [long](Get-ChildItem $Path -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum } catch {}
+    return $s
+}
+
+function Invoke-KGTuneUp {
+    # Conservative cleanup: temp folders (skips in-use files) + Recycle Bin.
+    # Reports what was freed; never touches documents, downloads, or libraries.
+    $freed = [long]0
+    $parts = @()
+    foreach ($t in @($env:TEMP, (Join-Path $env:SystemRoot "Temp"))) {
+        if (-not (Test-Path $t)) { continue }
+        $before = Get-KGFolderSize $t
+        Get-ChildItem $t -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+        $d = $before - (Get-KGFolderSize $t)
+        if ($d -gt 0) { $freed += $d; $parts += "temp $([math]::Round($d/1MB,1)) MB" }
+    }
+    try {
+        $binSize = [long]0
+        $shell = New-Object -ComObject Shell.Application
+        foreach ($i in $shell.Namespace(0xA).Items()) { $binSize += [long]$i.Size }
+        if ($binSize -gt 0) {
+            Clear-RecycleBin -Force -ErrorAction Stop
+            $freed += $binSize
+            $parts += "recycle bin $([math]::Round($binSize/1MB,1)) MB"
+        }
+    } catch { Write-KGLog "tune-up recycle bin skipped: $($_.Exception.Message)" }
+    $msg = if ($parts.Count -gt 0) { "tune-up freed $([math]::Round($freed/1MB,1)) MB (" + ($parts -join ", ") + ")" } else { "tune-up: nothing to clean" }
+    Write-KGLog $msg
+    Show-KGToast "KaviGuard tune-up" $msg
+    return $msg
+}
+
+function Invoke-KGPathScan($Path) {
+    # On-demand Defender scan of one file or folder (antivirus integration).
+    if (-not (Test-Path $Path)) { return "not found: $Path" }
+    Write-KGLog "on-demand scan started: $Path"
+    try {
+        if ((Get-Item $Path -ErrorAction Stop).PSIsContainer) {
+            Start-MpScan -ScanPath $Path -ScanType CustomScan -ErrorAction Stop
+        } else {
+            Invoke-KGDefenderFileScan $Path
+        }
+        $msg = "scan complete: $Path (details in Windows Security > Protection history)"
+    } catch { $msg = "scan failed ($Path): $($_.Exception.Message)" }
+    Write-KGLog $msg
+    Show-KGToast "KaviGuard scan" $msg
+    return $msg
+}
+
 # ------------------------------ agent CLI ------------------------------
 # One-shot modes so any Kavi agent can check on and drive KaviGuard.
 # These never start the watcher; they do their job and exit.
@@ -487,9 +550,11 @@ function Invoke-KGAgentCli {
         "scan requested: $t (see the KaviGuard log for results)"
         return
     }
+    if ($TuneUp) { Invoke-KGTuneUp; return }
+    if ($ScanPath) { Invoke-KGPathScan $ScanPath; return }
 }
 
-if ($Status -or $ScanNow -or $AddExclusion -or $RemoveExclusion) {
+if ($Status -or $ScanNow -or $AddExclusion -or $RemoveExclusion -or $TuneUp -or $ScanPath) {
     if (-not (Test-Path $InstallDir)) { New-Item $InstallDir -ItemType Directory -Force | Out-Null }
     Invoke-KGAgentCli
     exit
@@ -529,4 +594,5 @@ Register-ObjectEvent -InputObject $script:UTimer -EventName Elapsed -Action { In
 $script:UTimer.Start()
 
 Write-KGLog "active: $($script:Watchers.Count) watchers; scans daily $QuickScanTime / $FullScanDay $FullScanTime"
+Show-KGToast "KaviGuard $Version active" "Watching Downloads, Desktop and Temp. Double-click the desktop icon for the full status."
 while ($true) { Start-Sleep -Seconds 60; Invoke-KGScheduledScans; Write-KGStatus }

@@ -1,4 +1,4 @@
-# KaviGuard-Mailbox.ps1 - v1.3.0
+# KaviGuard-Mailbox.ps1 - v1.4.0
 # Unattended command poller for KaviGuard. Runs with zero AI.
 #
 # Every 15 minutes it signs in to Gmail over IMAP (app password, DPAPI-encrypted
@@ -25,7 +25,7 @@ $LockFile   = Join-Path $BoxDir "mailbox.lock"
 $CredFile   = Join-Path $BoxDir "cred.bin"
 $CfgFile    = Join-Path $BoxDir "config.json"
 $KGScript   = Join-Path $InstallDir "KaviGuard.ps1"
-$Ver        = "1.3.0"
+$Ver        = "1.4.0"
 
 function Write-MBLog {
     param([string]$Msg)
@@ -64,7 +64,7 @@ function Get-MBPassword {
     $enc = (Get-Content $CredFile -Raw -ErrorAction Stop).Trim()
     $sec = ConvertTo-SecureString $enc -ErrorAction Stop
     $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)
-    try { return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) }
+    try { return ([Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) -replace '\s','') }
     finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
 }
 
@@ -88,7 +88,7 @@ function Send-Imap {
                 if ($r -le 0) { break }
                 $got += $r
             }
-            if ($got -gt 0) { $lines += (-join $buf[0..($got-1)]) }
+            if ($got -gt 0) { $lines += ((-join $buf[0..($got-1)]) -split "`r?`n") }
             continue
         }
         $lines += $line
@@ -192,6 +192,11 @@ function Invoke-MailboxCommand {
         }
         "SCAN QUICK"    { return "quick scan " + (Invoke-KGTool @("-ScanNow","Quick") -Detached) + " - send COMMAND: LOG later to check results" }
         "SCAN FULL"     { return "full scan " + (Invoke-KGTool @("-ScanNow","Full") -Detached) + " - send COMMAND: LOG later to check results" }
+        "SCAN PATH"     {
+            if ($Arg -match '^[A-Za-z]:\\' -and $Arg -notmatch '\.\.') { return "path scan " + (Invoke-KGTool @("-ScanPath",$Arg) -Detached) + " - send COMMAND: LOG later to check results" }
+            return "rejected: bad path [$Arg]"
+        }
+        "TUNEUP"        { return Invoke-KGTool @("-TuneUp") }
         "EXCLUDE ADD"   {
             if ($Arg -match '^[A-Za-z]:\\' -and $Arg -notmatch '\.\.') { return Invoke-KGTool @("-AddExclusion",$Arg) }
             return "rejected: bad path [$Arg]"
@@ -200,7 +205,7 @@ function Invoke-MailboxCommand {
             if ($Arg -match '^[A-Za-z]:\\' -and $Arg -notmatch '\.\.') { return Invoke-KGTool @("-RemoveExclusion",$Arg) }
             return "rejected: bad path [$Arg]"
         }
-        default         { return "unknown command [$Cmd]. Valid: STATUS, VERSION, LOG, SCAN QUICK, SCAN FULL, EXCLUDE ADD, EXCLUDE REMOVE" }
+        default         { return "unknown command [$Cmd]. Valid: STATUS, VERSION, LOG, SCAN QUICK, SCAN FULL, SCAN PATH, TUNEUP, EXCLUDE ADD, EXCLUDE REMOVE" }
     }
 }
 
