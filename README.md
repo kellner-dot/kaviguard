@@ -1,4 +1,4 @@
-# KaviGuard v1.4.0
+# KaviGuard v1.4.1
 
 A lightweight Windows malware watcher. It does not replace Windows Defender —
 Defender stays the engine. KaviGuard is a watchdog + orchestrator around it:

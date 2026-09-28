@@ -162,8 +162,13 @@ function Get-MessageBody {
 
 function Set-MessageDone {
     param($Conn, [string]$Uid, [string]$Label)
-    [void](Send-Imap $Conn.Writer $Conn.Reader "UID STORE $Uid +FLAGS (\Seen)")
-    [void](Send-Imap $Conn.Writer $Conn.Reader "UID STORE $Uid -X-GM-LABELS ($Label)")
+    # NOTE: Archive-ResultMail leaves INBOX selected, and UIDs are per-mailbox,
+    # so re-select the command label first or we mark the wrong message (or none).
+    $sel = Send-Imap $Conn.Writer $Conn.Reader "SELECT `"$Label`""
+    if (-not $sel.Ok) { Write-MBLog "Set-MessageDone: SELECT $Label failed"; return }
+    $r1 = Send-Imap $Conn.Writer $Conn.Reader "UID STORE $Uid +FLAGS (\Seen)"
+    $r2 = Send-Imap $Conn.Writer $Conn.Reader "UID STORE $Uid -X-GM-LABELS ($Label)"
+    if (-not $r1.Ok -or -not $r2.Ok) { Write-MBLog "Set-MessageDone: STORE failed for UID $Uid" }
 }
 
 # ---------- command execution (strict whitelist) ----------
