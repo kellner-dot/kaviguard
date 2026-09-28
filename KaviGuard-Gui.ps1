@@ -23,6 +23,7 @@ function Get-KGData {
 }
 
 $form = New-Object System.Windows.Forms.Form
+if (Test-Path $script:ico) { $form.Icon = New-Object System.Drawing.Icon($script:ico) }
 $form.Text = "KaviGuard"
 $form.Size = New-Object System.Drawing.Size(480, 640)
 $form.StartPosition = "CenterScreen"
@@ -30,7 +31,7 @@ $form.BackColor = $bg
 $form.ForeColor = $fg
 $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
 $form.MaximizeBox = $false
-$form.MinimizeBox = $false
+$form.MinimizeBox = $true
 if (Test-Path $script:ico) { try { $form.Icon = New-Object System.Drawing.Icon($script:ico) } catch {} }
 
 # ---- header ----
@@ -193,4 +194,11 @@ Add-KGButton "Quarantine" "Open the folder where threats are held." 244 452 102 
 Add-KGButton "Close" "" 354 452 102 32 9 { $form.Close() }
 
 Update-KGGui
+# The wscript hidden launcher starts this process with SW_HIDE in STARTUPINFO, which
+# WinForms honors on first show - leaving the form invisible. Force it visible.
+Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class KGWin32 { [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow); [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam); [DllImport("shell32.dll")] public static extern int SetCurrentProcessExplicitAppUserModelID(string AppID); }'
+$showTimer = New-Object System.Windows.Forms.Timer
+$showTimer.Interval = 300
+$showTimer.Add_Tick({ $showTimer.Stop(); try { $kgIcon = New-Object System.Drawing.Icon($script:ico); $form.Icon = $kgIcon; [KGWin32]::SendMessage($form.Handle, 0x80, [IntPtr]1, $kgIcon.Handle) | Out-Null; [KGWin32]::SendMessage($form.Handle, 0x80, [IntPtr]0, $kgIcon.Handle) | Out-Null } catch {}; [KGWin32]::ShowWindow($form.Handle, 5) | Out-Null; $form.Visible = $true })
+$showTimer.Start()
 [void]$form.ShowDialog()

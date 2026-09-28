@@ -13,7 +13,7 @@ param(
 # scheduled Defender scans, and updates itself. No kernel driver, no AV engine.
 
 # ------------------------------ config ------------------------------
-$Version       = "1.4.1"
+$Version       = "1.4.2"
 $InstallDir    = "C:\Tools\KaviGuard"
 $QuarantineDir = Join-Path $InstallDir "quarantine"
 $LogDir        = Join-Path $InstallDir "logs"
@@ -401,14 +401,20 @@ function Write-KGStatus {
 }
 
 function Invoke-KGScan($ScanType) {
-    # lock file so scans never stack; stale locks (>12h) are cleared
+    # lock file so scans never stack; stale if the owner PID is gone or the lock is ancient (>6h)
     $lock = Join-Path $InstallDir "scan.lock"
     if (Test-Path $lock) {
+        $live = $false
+        try {
+            $owner = [int]((Get-Content $lock -Raw -ErrorAction Stop).Trim())
+            if ($owner -gt 0) { $null = Get-Process -Id $owner -ErrorAction Stop; $live = $true }
+        } catch {}
         $age = (Get-Date) - (Get-Item $lock).LastWriteTime
-        if ($age.TotalHours -lt 12) { Write-KGLog "scan skipped ($ScanType): already running"; return }
+        if ($live -and $age.TotalHours -lt 6) { Write-KGLog "scan skipped ($ScanType): already running"; return }
         Remove-Item $lock -Force -ErrorAction SilentlyContinue
+        Write-KGLog "cleared stale scan lock"
     }
-    New-Item $lock -ItemType File -Force | Out-Null
+    "$PID" | Set-Content $lock -Force
     try {
         Write-KGLog "scan start: $ScanType"
         $start = Get-Date
