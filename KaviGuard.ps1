@@ -13,7 +13,7 @@ param(
 # scheduled Defender scans, and updates itself. No kernel driver, no AV engine.
 
 # ------------------------------ config ------------------------------
-$Version       = "1.4.0"
+$Version       = "1.4.1"
 $InstallDir    = "C:\Tools\KaviGuard"
 $QuarantineDir = Join-Path $InstallDir "quarantine"
 $LogDir        = Join-Path $InstallDir "logs"
@@ -47,6 +47,8 @@ $KnownGoodTasks = @(
     "Tailscale",
     "Mesh Agent",
     "meshagent",
+    "KaviGuard",
+    "KaviGuard-Mailbox",
     "RVG agent",
     "RVG update check"
 )
@@ -94,23 +96,13 @@ function Test-KGExcluded($Path) {
 
 $script:ToastTriedInstall = $false
 function Show-KGToast($Title, $Message) {
-    # BurntToast if present; try one install; else Application event log. Never modal.
+    # BurntToast if already installed; otherwise the Application event log.
+    # Never modal, never installs anything (an install prompt kills hidden tasks).
     try {
         if (Get-Module -ListAvailable -Name BurntToast) {
             Import-Module BurntToast -ErrorAction Stop
             New-BurntToastNotification -Text $Title, $Message -ErrorAction Stop
             return
-        }
-        if (-not $script:ToastTriedInstall) {
-            $script:ToastTriedInstall = $true
-            try { Install-Module BurntToast -Force -Scope CurrentUser -ErrorAction Stop } catch {
-                Write-KGLog "BurntToast install failed, using event-log fallback"
-            }
-            if (Get-Module -ListAvailable -Name BurntToast) {
-                Import-Module BurntToast -ErrorAction Stop
-                New-BurntToastNotification -Text $Title, $Message -ErrorAction Stop
-                return
-            }
         }
     } catch {}
     try {
